@@ -7,11 +7,12 @@ import { PlayerState } from '@/types/player';
 /**
  * YouTubePlayer — Hidden YouTube IFrame that handles actual audio playback.
  *
- * Re-designed state machine for transition/intent tracking:
- * - Prevents loading transitions from corrupting state.isPlaying.
- * - Tracks user playback intent in playIntentRef.
- * - Ignores stale YouTube events from previously skipped videos to avoid race conditions.
- * - Correctly toggles loading spinner during buffering/loading states.
+ * Fixed Initial Load & Race Condition Engine:
+ * - Tracks player ready state (isPlayerReadyRef).
+ * - Prevents cueing/loading videos on uninitialized YouTube players.
+ * - Handles initial song cueing safely inside onReady when ready.
+ * - Ignores stale/uninitialized error events (isEventForCurrentTrack).
+ * - Preserves playback intent (playIntentRef) across song skips.
  */
 export function YouTubePlayer() {
   const { state, dispatch, playerRef } = usePlayer();
@@ -19,6 +20,9 @@ export function YouTubePlayer() {
   // Refs to access latest state inside callbacks without re-creating the YT player
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // Track player ready status
+  const isPlayerReadyRef = useRef<boolean>(false);
 
   // Track the last loaded video ID to avoid redundant loads
   const lastLoadedIdRef = useRef<string | null>(null);
@@ -46,22 +50,27 @@ export function YouTubePlayer() {
 
   // Helper to verify if the event matches the current track ID to avoid race conditions
   const isEventForCurrentTrack = (event: any): boolean => {
+    // If player is not ready yet, event is not for current track
+    if (!isPlayerReadyRef.current) return false;
+
     const currentTrackId = getCurrentTrackId(stateRef.current);
     if (!currentTrackId) return false;
 
     let playerVideoId = '';
     if (event.target && typeof event.target.getVideoUrl === 'function') {
       const url = event.target.getVideoUrl();
-      const match = url.match(/[?&]v=([^&#]+)/);
+      const match = url ? url.match(/[?&]v=([^&#]+)/) : null;
       playerVideoId = match ? match[1] : '';
     }
-    if (!playerVideoId && typeof event.target.getVideoData === 'function') {
+    if (!playerVideoId && event.target && typeof event.target.getVideoData === 'function') {
       const data = event.target.getVideoData();
       playerVideoId = data ? data.video_id : '';
     }
 
-    // If we can't extract it, fall back to true (process it anyway) but usually we can
-    return !playerVideoId || playerVideoId === currentTrackId;
+    // An uninitialized player or empty video ID is NOT a valid track error
+    if (!playerVideoId) return false;
+
+    return playerVideoId === currentTrackId;
   };
 
   // Initialize YouTube IFrame API — only once
@@ -94,16 +103,26 @@ export function YouTubePlayer() {
         },
         events: {
           onReady: (event) => {
+            isPlayerReadyRef.current = true;
             const s = stateRef.current;
             event.target.setVolume(s.volume);
             if (s.isMuted) {
               event.target.mute();
             }
             dispatch({ type: 'SET_LOADING', payload: false });
+
+            // Safely load the initial track now that the player is ready
+            const currentTrackId = getCurrentTrackId(s);
+            if (currentTrackId && lastLoadedIdRef.current !== currentTrackId) {
+              lastLoadedIdRef.current = currentTrackId;
+              isTransitioningRef.current = true;
+              dispatch({ type: 'SET_LOADING', payload: true });
+              event.target.cueVideoById(currentTrackId);
+            }
           },
           onStateChange: (event) => {
             if (!isEventForCurrentTrack(event)) {
-              return; // Ignore callbacks from stale/skipped videos
+              return; // Ignore callbacks from stale/uninitialized/skipped videos
             }
 
             const ytState = event.data;
@@ -120,7 +139,6 @@ export function YouTubePlayer() {
               }
             } else if (ytState === window.YT.PlayerState.PAUSED) {
               // PAUSED (2)
-              // Only dispatch PAUSE to React state if we are NOT in the middle of a video transition
               if (!isTransitioningRef.current) {
                 dispatch({ type: 'SET_LOADING', payload: false });
                 dispatch({ type: 'PAUSE' });
@@ -139,7 +157,6 @@ export function YouTubePlayer() {
               dispatch({ type: 'SET_LOADING', payload: true });
             } else if (ytState === window.YT.PlayerState.CUED) {
               // CUED (5)
-              // The video has finished loading and is ready. We can now complete the transition.
               isTransitioningRef.current = false;
               dispatch({ type: 'SET_LOADING', payload: false });
 
@@ -147,13 +164,13 @@ export function YouTubePlayer() {
               if (playIntentRef.current) {
                 event.target.playVideo();
               } else {
-                // If intent was paused, make sure context state is set to paused
                 dispatch({ type: 'PAUSE' });
               }
             }
           },
           onError: (event) => {
-            if (!isEventForCurrentTrack(event)) return;
+            // Ignore errors if player is not ready or if event is not for the current track
+            if (!isPlayerReadyRef.current || !isEventForCurrentTrack(event)) return;
 
             const errCode = event.data;
             let errorMsg = 'প্লেব্যাক ত্রুটি হয়েছে।';
@@ -197,7 +214,7 @@ export function YouTubePlayer() {
   useEffect(() => {
     const player = playerRef.current;
     if (!player || typeof player.playVideo !== 'function') return;
-    if (!activeVideoId) return;
+    if (!activeVideoId || !isPlayerReadyRef.current) return;
 
     // Synchronize play intent with the user's manual action
     playIntentRef.current = state.isPlaying;
@@ -217,6 +234,8 @@ export function YouTubePlayer() {
     const player = playerRef.current;
     if (!player || typeof player.cueVideoById !== 'function') return;
     if (!activeVideoId) return;
+    // Don't attempt to load on an unready player; onReady will handle initial cue
+    if (!isPlayerReadyRef.current) return;
 
     // Clear error timers
     if (errorTimeoutRef.current) {
@@ -244,6 +263,7 @@ export function YouTubePlayer() {
   useEffect(() => {
     const player = playerRef.current;
     if (!player || typeof player.setVolume !== 'function') return;
+    if (!isPlayerReadyRef.current) return;
 
     player.setVolume(state.volume);
     if (state.isMuted) {
