@@ -2,19 +2,31 @@
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Radio, Info, X, Users, Volume2, VolumeX, Bell } from 'lucide-react';
+import { Radio, Info, X, Users, Volume2, VolumeX, Bell, Menu, ListMusic, ExternalLink } from 'lucide-react';
 import { usePlayer } from '@/features/player/PlayerContext';
 
+interface AgomoniHeaderProps {
+  onTogglePlaylist?: () => void;
+}
+
+function YoutubeIcon({ className = 'w-5 h-5' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+    </svg>
+  );
+}
+
 /**
- * AgomoniHeader — Top-fixed header with Bengali branding, dynamic online listener
- * count (real active session heartbeat), and interactive status controls:
- * - Dedicated Mahalaya Button (🔔 মহালয়া)
- * - Mute/Volume Icon Button (🔊)
- * - Cultural Info Button (ⓘ)
+ * AgomoniHeader — Top-fixed header with Bengali branding & responsive navigation:
+ * - Desktop: Full top-right control bar (Mahalaya, Live/Presence Status, Mute, Info)
+ * - Mobile: Clean hamburger menu button opening a polished dark translucent drawer
+ *   containing all mobile action controls (YouTube Playlist, Playlist, Mahalaya, Mute, Info, Presence).
  */
-export default function AgomoniHeader() {
+export default function AgomoniHeader({ onTogglePlaylist }: AgomoniHeaderProps) {
   const { state, dispatch, playMahalaya } = usePlayer();
   const [isInfoOpen, setIsInfoOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [listenerCount, setListenerCount] = useState(1);
 
   // Toggle Mute from the centralized player state
@@ -26,14 +38,12 @@ export default function AgomoniHeader() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    // Retrieve or create a unique session ID
     let sessionId = localStorage.getItem('agomoni_session_id');
     if (!sessionId) {
       sessionId = 'sess_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
       localStorage.setItem('agomoni_session_id', sessionId);
     }
 
-    // Safely increment/decrement active tab counter in localStorage
     const updateTabCount = (val: number) => {
       try {
         const count = parseInt(localStorage.getItem('agomoni_active_tabs') || '0', 10);
@@ -47,7 +57,6 @@ export default function AgomoniHeader() {
 
     updateTabCount(1);
 
-    // Heartbeat fetch request to the server presence API
     const sendHeartbeat = async (action?: 'connect' | 'disconnect') => {
       try {
         const res = await fetch('/api/presence', {
@@ -56,7 +65,7 @@ export default function AgomoniHeader() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ sessionId, action }),
-          keepalive: action === 'disconnect', // keeps request alive after tab close
+          keepalive: action === 'disconnect',
         });
 
         if (res.ok) {
@@ -70,21 +79,17 @@ export default function AgomoniHeader() {
       }
     };
 
-    // Send initial session connection
     sendHeartbeat('connect');
 
-    // Send heartbeat every 15 seconds to stay active in sorted set
     const heartbeatInterval = setInterval(() => {
       if (navigator.onLine !== false) {
         sendHeartbeat();
       }
     }, 15000);
 
-    // Handle tab unloading
     const handleUnload = () => {
       const remainingTabs = updateTabCount(-1);
       if (remainingTabs === 0) {
-        // Last tab closed, send synchronous/beacon style disconnect to drop count immediately
         sendHeartbeat('disconnect');
       }
     };
@@ -92,7 +97,6 @@ export default function AgomoniHeader() {
     window.addEventListener('beforeunload', handleUnload);
     window.addEventListener('pagehide', handleUnload);
 
-    // Reconnect immediately when browser comes back online
     const handleOnline = () => {
       sendHeartbeat('connect');
     };
@@ -125,7 +129,7 @@ export default function AgomoniHeader() {
           aria-hidden="true"
         />
 
-        <div className="relative flex flex-col md:flex-row md:items-start justify-between px-6 sm:px-8 lg:px-10 pt-5 pb-6 md:pt-6 md:pb-12 gap-4">
+        <div className="relative flex items-start justify-between px-6 sm:px-8 lg:px-10 pt-5 pb-6 md:pt-6 md:pb-12 gap-4">
           {/* Left — Branding */}
           <div className="flex flex-col">
             <h1
@@ -142,8 +146,8 @@ export default function AgomoniHeader() {
             </p>
           </div>
 
-          {/* Right — Radio Status, Listener count & Controls */}
-          <div className="flex flex-wrap items-center gap-3 sm:gap-4 md:mt-2.5 self-start md:self-auto">
+          {/* Desktop Right — Radio Status, Listener count & Controls (hidden on mobile) */}
+          <div className="hidden md:flex flex-wrap items-center gap-3 sm:gap-4 md:mt-2.5">
             {/* Dedicated Mahalaya Button (🔔 মহালয়া) */}
             <button
               onClick={playMahalaya}
@@ -203,8 +207,146 @@ export default function AgomoniHeader() {
               <Info size={18} className="text-[#FFF8E7]" />
             </button>
           </div>
+
+          {/* Mobile Right — Single Hamburger Menu Button (visible on mobile only) */}
+          <div className="flex md:hidden items-center mt-1">
+            <button
+              onClick={() => setIsMobileMenuOpen((prev) => !prev)}
+              className="w-10 h-10 rounded-lg flex items-center justify-center bg-[rgba(20,12,8,0.7)] hover:bg-[rgba(20,12,8,0.9)] border border-[rgba(212,175,55,0.25)] text-[#FFF8E7] transition-all focus:outline-none"
+              aria-label="Toggle mobile menu"
+              title="মেনু"
+            >
+              {isMobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+            </button>
+          </div>
         </div>
       </motion.header>
+
+      {/* Mobile Responsive Navigation Drawer */}
+      <AnimatePresence>
+        {isMobileMenuOpen && (
+          <div className="fixed inset-0 z-40 md:hidden flex justify-end p-4 pt-20">
+            {/* Backdrop Overlay */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              aria-hidden="true"
+            />
+
+            {/* Mobile Menu Panel */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: -10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+              className="relative w-full max-w-xs bg-[rgba(20,12,8,0.95)] backdrop-blur-xl border border-[rgba(212,175,55,0.25)] rounded-2xl p-5 shadow-2xl z-10 flex flex-col gap-4 select-none"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-[rgba(212,175,55,0.15)]">
+                <span className="font-bengali text-lg font-bold text-[#D4AF37]">মেনু</span>
+                <button
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="text-[#FFF8E7]/70 hover:text-[#FFF8E7] p-1 rounded-md hover:bg-white/5"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Radio Status & Presence Card */}
+              <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-[rgba(255,248,231,0.05)] border border-[rgba(212,175,55,0.15)] text-xs text-[#FFF8E7]">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#C0392B]"></span>
+                  </span>
+                  <span className="font-bengali font-medium">Agomoni LIVE</span>
+                </div>
+                <div className="flex items-center gap-1.5 font-mono text-[#D4AF37]">
+                  <Users size={13} />
+                  <span>{listenerCount} listening</span>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex flex-col gap-2.5 pt-1">
+                {/* Mahalaya Button */}
+                <button
+                  onClick={() => {
+                    playMahalaya();
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold font-bengali border transition-all ${
+                    state.isMahalaya
+                      ? 'bg-[#D4AF37] text-[rgba(20,12,8,1)] border-[#D4AF37]'
+                      : 'bg-[rgba(255,248,231,0.04)] text-[#D4AF37] border-[rgba(212,175,55,0.2)] hover:bg-[rgba(212,175,55,0.1)]'
+                  }`}
+                >
+                  <Bell size={16} className={state.isMahalaya ? 'animate-bounce' : ''} />
+                  <span>মহালয়া (মহিষাসুরমর্দিনী)</span>
+                </button>
+
+                {/* Playlist Drawer Button */}
+                <button
+                  onClick={() => {
+                    if (onTogglePlaylist) onTogglePlaylist();
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium font-bengali text-[#FFF8E7] bg-[rgba(255,248,231,0.04)] border border-[rgba(212,175,55,0.15)] hover:bg-[rgba(255,248,231,0.08)] transition-all"
+                >
+                  <ListMusic size={16} className="text-[#D4AF37]" />
+                  <span>গানের তালিকা (প্লেলিস্ট)</span>
+                </button>
+
+                {/* YouTube Playlist External Link */}
+                <a
+                  href="https://www.youtube.com/playlist?list=PLOjcTOzcuKqo"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium font-bengali text-[#FFF8E7] bg-[rgba(255,248,231,0.04)] border border-[rgba(212,175,55,0.15)] hover:bg-[rgba(255,248,231,0.08)] transition-all"
+                >
+                  <div className="flex items-center gap-3">
+                    <YoutubeIcon className="w-4 h-4 text-[#FF0000]" />
+                    <span>ইউটিউব প্লেলিস্ট</span>
+                  </div>
+                  <ExternalLink size={14} className="opacity-50" />
+                </a>
+
+                {/* Mute Toggle Button */}
+                <button
+                  onClick={handleToggleMute}
+                  className="flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium font-bengali text-[#FFF8E7] bg-[rgba(255,248,231,0.04)] border border-[rgba(212,175,55,0.15)] hover:bg-[rgba(255,248,231,0.08)] transition-all"
+                >
+                  <div className="flex items-center gap-3">
+                    {state.isMuted ? (
+                      <VolumeX size={16} className="text-[#C0392B]" />
+                    ) : (
+                      <Volume2 size={16} className="text-[#D4AF37]" />
+                    )}
+                    <span>{state.isMuted ? 'আনমিউট করুন' : 'মিউট করুন'}</span>
+                  </div>
+                  <span className="text-xs text-[#FFF8E7]/50">{state.isMuted ? 'Muted' : 'Sound On'}</span>
+                </button>
+
+                {/* Cultural About Info Button */}
+                <button
+                  onClick={() => {
+                    setIsInfoOpen(true);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium font-bengali text-[#FFF8E7] bg-[rgba(255,248,231,0.04)] border border-[rgba(212,175,55,0.15)] hover:bg-[rgba(255,248,231,0.08)] transition-all"
+                >
+                  <Info size={16} className="text-[#D4AF37]" />
+                  <span>তথ্য ও বিবরণ (About)</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Cultural Info Modal */}
       <AnimatePresence>

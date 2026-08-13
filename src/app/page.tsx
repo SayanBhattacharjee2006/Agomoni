@@ -29,8 +29,8 @@ function AgomoniContent() {
         {isLoading && <LoadingState />}
       </AnimatePresence>
 
-      {/* Top header with branding */}
-      <AgomoniHeader />
+      {/* Top header with branding & responsive navigation */}
+      <AgomoniHeader onTogglePlaylist={() => setIsPlaylistOpen((prev) => !prev)} />
 
       {/* Main content area — mostly empty to let the background shine */}
       <main className="relative z-10 min-h-screen flex flex-col">
@@ -38,7 +38,7 @@ function AgomoniContent() {
         <div className="flex-1" />
       </main>
 
-      {/* Collapsible playlist toggle button */}
+      {/* Floating playlist toggle stack (Desktop only) */}
       <PlaylistToggle
         isOpen={isPlaylistOpen}
         onToggle={() => setIsPlaylistOpen((prev) => !prev)}
