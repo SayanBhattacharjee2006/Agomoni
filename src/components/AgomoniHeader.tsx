@@ -7,7 +7,7 @@ import { usePlayer } from '@/features/player/PlayerContext';
 
 /**
  * AgomoniHeader — Top-fixed header with Bengali branding, dynamic online listener
- * count, and interactive status controls:
+ * count (real active session heartbeat), and interactive status controls:
  * - Dedicated Mahalaya Button (🔔 মহালয়া)
  * - Mute/Volume Icon Button (🔊)
  * - Cultural Info Button (ⓘ)
@@ -15,18 +15,50 @@ import { usePlayer } from '@/features/player/PlayerContext';
 export default function AgomoniHeader() {
   const { state, dispatch, playMahalaya } = usePlayer();
   const [isInfoOpen, setIsInfoOpen] = useState(false);
-  const [listenerCount, setListenerCount] = useState(46);
+  const [listenerCount, setListenerCount] = useState(1);
 
   // Toggle Mute from the centralized player state
   const handleToggleMute = () => {
     dispatch({ type: 'TOGGLE_MUTE' });
   };
 
-  // Fetch dynamic online presence from API
+  // Register session & heartbeat for active user presence tracking
   useEffect(() => {
-    const fetchPresence = async () => {
+    if (typeof window === 'undefined') return;
+
+    // Retrieve or create a unique session ID
+    let sessionId = localStorage.getItem('agomoni_session_id');
+    if (!sessionId) {
+      sessionId = 'sess_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+      localStorage.setItem('agomoni_session_id', sessionId);
+    }
+
+    // Safely increment/decrement active tab counter in localStorage
+    const updateTabCount = (val: number) => {
       try {
-        const res = await fetch('/api/presence');
+        const count = parseInt(localStorage.getItem('agomoni_active_tabs') || '0', 10);
+        const newCount = Math.max(0, count + val);
+        localStorage.setItem('agomoni_active_tabs', String(newCount));
+        return newCount;
+      } catch {
+        return 1;
+      }
+    };
+
+    updateTabCount(1);
+
+    // Heartbeat fetch request to the server presence API
+    const sendHeartbeat = async (action?: 'connect' | 'disconnect') => {
+      try {
+        const res = await fetch('/api/presence', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ sessionId, action }),
+          keepalive: action === 'disconnect', // keeps request alive after tab close
+        });
+
         if (res.ok) {
           const data = await res.json();
           if (data && typeof data.online === 'number') {
@@ -34,13 +66,45 @@ export default function AgomoniHeader() {
           }
         }
       } catch (err) {
-        console.error('Failed to fetch listener count:', err);
+        console.error('Failed to update active user count:', err);
       }
     };
 
-    fetchPresence();
-    const interval = setInterval(fetchPresence, 30000);
-    return () => clearInterval(interval);
+    // Send initial session connection
+    sendHeartbeat('connect');
+
+    // Send heartbeat every 15 seconds to stay active in sorted set
+    const heartbeatInterval = setInterval(() => {
+      if (navigator.onLine !== false) {
+        sendHeartbeat();
+      }
+    }, 15000);
+
+    // Handle tab unloading
+    const handleUnload = () => {
+      const remainingTabs = updateTabCount(-1);
+      if (remainingTabs === 0) {
+        // Last tab closed, send synchronous/beacon style disconnect to drop count immediately
+        sendHeartbeat('disconnect');
+      }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+
+    // Reconnect immediately when browser comes back online
+    const handleOnline = () => {
+      sendHeartbeat('connect');
+    };
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      clearInterval(heartbeatInterval);
+      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
+      window.removeEventListener('online', handleOnline);
+      updateTabCount(-1);
+    };
   }, []);
 
   return (

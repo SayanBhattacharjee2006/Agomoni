@@ -2,15 +2,16 @@
 
 import { useEffect, useRef } from 'react';
 import { usePlayer, MAHALAYA_VIDEO_ID } from './PlayerContext';
+import { PlayerState } from '@/types/player';
 
 /**
  * YouTubePlayer — Hidden YouTube IFrame that handles actual audio playback.
  *
- * Requirements:
- * - Decouples state.error from playlist view.
- * - Gracefully catches embedding errors (like 101/150) and displays a clean localized
- *   message in the player console before auto-skipping.
- * - Cleans up skip timers if users click next/prev during the error state.
+ * Re-designed state machine for transition/intent tracking:
+ * - Prevents loading transitions from corrupting state.isPlaying.
+ * - Tracks user playback intent in playIntentRef.
+ * - Ignores stale YouTube events from previously skipped videos to avoid race conditions.
+ * - Correctly toggles loading spinner during buffering/loading states.
  */
 export function YouTubePlayer() {
   const { state, dispatch, playerRef } = usePlayer();
@@ -24,6 +25,44 @@ export function YouTubePlayer() {
 
   // Store ref for the error auto-skip timer to clear it if user manually navigates
   const errorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Playback intent: stores if the user wants music to actively play
+  const playIntentRef = useRef<boolean>(state.isPlaying);
+
+  // Transition state: true during loading/cueing of a new track
+  const isTransitioningRef = useRef<boolean>(false);
+
+  // Helper to extract current video ID from state
+  const getCurrentTrackId = (s: PlayerState): string | null => {
+    if (s.isMahalaya) {
+      return MAHALAYA_VIDEO_ID || null;
+    }
+    if (s.playlist.length === 0) {
+      return null;
+    }
+    const currentSong = s.playlist[s.currentIndex];
+    return currentSong ? currentSong.id : null;
+  };
+
+  // Helper to verify if the event matches the current track ID to avoid race conditions
+  const isEventForCurrentTrack = (event: any): boolean => {
+    const currentTrackId = getCurrentTrackId(stateRef.current);
+    if (!currentTrackId) return false;
+
+    let playerVideoId = '';
+    if (event.target && typeof event.target.getVideoUrl === 'function') {
+      const url = event.target.getVideoUrl();
+      const match = url.match(/[?&]v=([^&#]+)/);
+      playerVideoId = match ? match[1] : '';
+    }
+    if (!playerVideoId && typeof event.target.getVideoData === 'function') {
+      const data = event.target.getVideoData();
+      playerVideoId = data ? data.video_id : '';
+    }
+
+    // If we can't extract it, fall back to true (process it anyway) but usually we can
+    return !playerVideoId || playerVideoId === currentTrackId;
+  };
 
   // Initialize YouTube IFrame API — only once
   useEffect(() => {
@@ -63,38 +102,59 @@ export function YouTubePlayer() {
             dispatch({ type: 'SET_LOADING', payload: false });
           },
           onStateChange: (event) => {
+            if (!isEventForCurrentTrack(event)) {
+              return; // Ignore callbacks from stale/skipped videos
+            }
+
             const ytState = event.data;
             const s = stateRef.current;
 
-            if (ytState === 1) {
-              // PLAYING
+            if (ytState === window.YT.PlayerState.PLAYING) {
+              // PLAYING (1)
+              isTransitioningRef.current = false;
               dispatch({ type: 'SET_LOADING', payload: false });
               dispatch({ type: 'PLAY' });
               const dur = event.target.getDuration();
               if (dur > 0) {
                 dispatch({ type: 'SET_DURATION', payload: dur });
               }
-            } else if (ytState === 2) {
-              // PAUSED
-              dispatch({ type: 'SET_LOADING', payload: false });
-              dispatch({ type: 'PAUSE' });
-            } else if (ytState === 0) {
-              // ENDED
+            } else if (ytState === window.YT.PlayerState.PAUSED) {
+              // PAUSED (2)
+              // Only dispatch PAUSE to React state if we are NOT in the middle of a video transition
+              if (!isTransitioningRef.current) {
+                dispatch({ type: 'SET_LOADING', payload: false });
+                dispatch({ type: 'PAUSE' });
+              }
+            } else if (ytState === window.YT.PlayerState.ENDED) {
+              // ENDED (0)
+              isTransitioningRef.current = false;
               if (s.repeat) {
                 event.target.seekTo(0, true);
                 event.target.playVideo();
               } else {
                 dispatch({ type: 'NEXT' });
               }
-            } else if (ytState === 3) {
-              // BUFFERING
+            } else if (ytState === window.YT.PlayerState.BUFFERING) {
+              // BUFFERING (3)
               dispatch({ type: 'SET_LOADING', payload: true });
-            } else if (ytState === 5) {
-              // CUED
+            } else if (ytState === window.YT.PlayerState.CUED) {
+              // CUED (5)
+              // The video has finished loading and is ready. We can now complete the transition.
+              isTransitioningRef.current = false;
               dispatch({ type: 'SET_LOADING', payload: false });
+
+              // Apply the play/pause intent captured before the transition
+              if (playIntentRef.current) {
+                event.target.playVideo();
+              } else {
+                // If intent was paused, make sure context state is set to paused
+                dispatch({ type: 'PAUSE' });
+              }
             }
           },
           onError: (event) => {
+            if (!isEventForCurrentTrack(event)) return;
+
             const errCode = event.data;
             let errorMsg = 'প্লেব্যাক ত্রুটি হয়েছে।';
 
@@ -131,27 +191,34 @@ export function YouTubePlayer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Determine active video ID
-  const getActiveVideoId = (): string | null => {
-    if (state.isMahalaya) {
-      return MAHALAYA_VIDEO_ID || null;
-    }
-    if (state.playlist.length === 0) {
-      return null;
-    }
-    const currentSong = state.playlist[state.currentIndex];
-    return currentSong ? currentSong.id : null;
-  };
+  const activeVideoId = getCurrentTrackId(state);
 
-  const activeVideoId = getActiveVideoId();
-
-  // Load video on activeVideoId change
+  // Sync state.isPlaying changes (e.g. user manually clicked play/pause)
   useEffect(() => {
     const player = playerRef.current;
-    if (!player || typeof player.loadVideoById !== 'function') return;
+    if (!player || typeof player.playVideo !== 'function') return;
     if (!activeVideoId) return;
 
-    // Clear any pending error-skip timer if the active video changes (e.g. user skipped manually)
+    // Synchronize play intent with the user's manual action
+    playIntentRef.current = state.isPlaying;
+
+    // Do not sync if the player is currently transitioning/loading
+    if (isTransitioningRef.current) return;
+
+    if (state.isPlaying) {
+      player.playVideo();
+    } else {
+      player.pauseVideo();
+    }
+  }, [state.isPlaying, activeVideoId, playerRef]);
+
+  // Load video on activeVideoId change (i.e. user skipped or selected another track)
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || typeof player.cueVideoById !== 'function') return;
+    if (!activeVideoId) return;
+
+    // Clear error timers
     if (errorTimeoutRef.current) {
       clearTimeout(errorTimeoutRef.current);
       errorTimeoutRef.current = null;
@@ -161,25 +228,17 @@ export function YouTubePlayer() {
     if (lastLoadedIdRef.current === activeVideoId) return;
     lastLoadedIdRef.current = activeVideoId;
 
-    if (state.isPlaying) {
-      player.loadVideoById(activeVideoId);
-    } else {
-      player.cueVideoById(activeVideoId);
-    }
-  }, [activeVideoId, state.isPlaying, playerRef]);
+    // Capture playback state before changing track to preserve playback intent
+    playIntentRef.current = stateRef.current.isPlaying;
 
-  // Sync play/pause changes
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player || typeof player.playVideo !== 'function') return;
-    if (!activeVideoId) return;
+    // Set transition state to true so intermediate state changes are ignored
+    isTransitioningRef.current = true;
+    dispatch({ type: 'SET_LOADING', payload: true });
 
-    if (state.isPlaying) {
-      player.playVideo();
-    } else {
-      player.pauseVideo();
-    }
-  }, [state.isPlaying, activeVideoId, playerRef]);
+    // Always cue the video first to prevent autostart race conditions.
+    // When the cued video is ready, the CUED event handler will play it if playIntentRef is true.
+    player.cueVideoById(activeVideoId);
+  }, [activeVideoId, playerRef, dispatch]);
 
   // Sync volume and mute
   useEffect(() => {
